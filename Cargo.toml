@@ -1,0 +1,8 @@
+[package]
+name = "lisp_runtime_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nom = "8.0.0"
+rustyline = "17.0.2"
