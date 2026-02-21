@@ -18,6 +18,7 @@ The crate name is currently `lisp_runtime_rust`.
 - [How to build](#how-to-build)
 - [How to run](#how-to-run)
 - [How to test](#how-to-test)
+- [Code coverage](#code-coverage)
 - [REPL command reference](#repl-command-reference)
 - [Example expressions to try](#example-expressions-to-try)
 - [Known limitations and behavior notes](#known-limitations-and-behavior-notes)
@@ -293,6 +294,50 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ---
+
+
+## Code coverage
+
+This repository includes an automated coverage workflow at:
+
+```text
+.github/workflows/coverage.yml
+```
+
+It uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) to generate:
+
+- a terminal summary (`--summary-only`)
+- an `lcov.info` file (uploaded as a CI artifact)
+- optional upload to Codecov (`fail_ci_if_error: false`)
+
+### Run coverage locally
+
+1. Install the cargo subcommand once:
+
+```bash
+cargo install cargo-llvm-cov
+```
+
+2. Generate a local summary + LCOV report:
+
+```bash
+cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --summary-only
+```
+
+3. (Optional) Open HTML coverage report locally:
+
+```bash
+cargo llvm-cov --workspace --all-features --open
+```
+
+### Notes
+
+- `cargo llvm-cov` automatically sets the required LLVM coverage flags for Rust builds.
+- If you only want the numeric terminal summary, keep `--summary-only`.
+- If you want machine-consumable output for external services, use the generated `lcov.info`.
+
+---
+
 
 ## REPL command reference
 
