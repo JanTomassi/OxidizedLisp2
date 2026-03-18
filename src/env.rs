@@ -1,17 +1,60 @@
-use std::{collections::HashMap, sync::Arc};
+//! The runtime environment for symbol bindings.
+//!
+//! The environment maps symbol names to values (`SAtom`). Both ordinary
+//! values and functions share the same namespace (`val`), implementing
+//! "Option 3: unify the namespaces" as described in the design.
+//!
+//! Builtin functions are installed as `Atom::Fun` values in the default
+//! environment, making them first-class values that can be stored in
+//! variables, passed as arguments, and called via `funcall`.
 
-use crate::{
-    atom::{Atom, Fun, SAtom, UserFn},
-    lisp_eval::{apply_callable, eval, Args, EvalResult},
-    nil, num,
-    sexpr::SExpr,
-    t,
-};
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::atom::{Atom, Fun, SAtom};
+use crate::lisp_eval::apply_callable_step;
+use crate::nil;
+use crate::sexpr::SExpr;
+use crate::t;
+use crate::types::{Args, EvalResult, Step};
+
+/// Trait for the evaluator environment.
+///
+/// This trait abstracts over the environment operations needed by native
+/// functions, allowing `Fun::Native` to be defined without a direct
+/// reference to the `Env` type (which would create a circular dependency).
+pub trait EvaluatorEnv {
+    fn lookup(&self, name: &str) -> Option<SAtom>;
+    fn insert(&mut self, name: String, value: SAtom);
+    fn get_val(&self) -> &HashMap<String, SAtom>;
+    fn set_val(&mut self, val: HashMap<String, SAtom>);
+}
+
+impl EvaluatorEnv for Env {
+    fn lookup(&self, name: &str) -> Option<SAtom> {
+        self.val.get(name).cloned()
+    }
+
+    fn insert(&mut self, name: String, value: SAtom) {
+        self.val.insert(name, value);
+    }
+
+    fn get_val(&self) -> &HashMap<String, SAtom> {
+        &self.val
+    }
+
+    fn set_val(&mut self, val: HashMap<String, SAtom>) {
+        self.val = val;
+    }
+}
+
+/// The runtime environment.
+///
+/// Maps symbol names to values. Both ordinary values and functions
+/// are stored in the same `val` map, enabling unified namespace semantics.
 #[derive(Clone)]
 pub struct Env {
     pub val: HashMap<String, SAtom>,
-    pub fun: Arc<HashMap<String, Fun>>,
 }
 
 macro_rules! take_args {
@@ -24,6 +67,7 @@ macro_rules! take_args {
     }};
 }
 
+/// Counts the number of arguments in an Args value.
 #[inline]
 fn get_args_count(args: &Args) -> usize {
     match args {
@@ -32,6 +76,7 @@ fn get_args_count(args: &Args) -> usize {
     }
 }
 
+/// Validates that exactly `n` arguments were provided.
 #[inline]
 fn expect_exact_args(args: &Args, n: usize, msg: &'static str) -> Result<(), &'static str> {
     if get_args_count(args) == n {
@@ -41,6 +86,7 @@ fn expect_exact_args(args: &Args, n: usize, msg: &'static str) -> Result<(), &'s
     }
 }
 
+/// Validates that at least `n` arguments were provided.
 #[inline]
 fn expect_min_args(args: &Args, n: usize, msg: &'static str) -> Result<(), &'static str> {
     if get_args_count(args) >= n {
@@ -50,63 +96,21 @@ fn expect_min_args(args: &Args, n: usize, msg: &'static str) -> Result<(), &'sta
     }
 }
 
+/// Extracts a numeric value from an already-evaluated Atom.
+///
+/// Returns an error if the atom is not a number.
 #[inline]
-fn atom_to_args(atom: &Atom) -> Result<Args, &'static str> {
-    match atom {
-        Atom::Nil => Ok(Args::Nil),
-        Atom::Cons(sexpr) => Ok(Args::S(sexpr)),
-        _ => Err("expected list"),
-    }
-}
-
-#[inline]
-fn resolve_value<'a>(arg: &'a Atom, env: &'a Env) -> Option<&'a Atom> {
-    match arg {
-        Atom::Sym(sym) => env.val.get(sym).map(|v| v.as_ref()),
-        other => Some(other),
-    }
-}
-
-#[inline]
-fn get_val_from_sym<'a>(sname: &str, s: &'a Env) -> Option<&'a Atom> {
-    s.val.get(sname).map(|v| v.as_ref())
-}
-
-pub fn get_args_from_val(args: &Atom, s: &mut Env, eval_args: bool) -> SAtom {
-    match args {
-        Atom::Nil => SExpr::empty_list(),
-        Atom::Cons(sexpr) => SExpr::from_satoms(sexpr.iter().map(|it| {
-            if eval_args {
-                eval(it, s).expect("Couldn't eval arg")
-            } else {
-                it
-            }
-        })),
-        _ => panic!("expected list"),
-    }
-}
-
-pub fn get_num(v: SAtom, s: &mut Env) -> Result<f64, &'static str> {
-    match &*v {
+fn get_num_value(v: &Atom) -> Result<f64, &'static str> {
+    match v {
         Atom::Num(n) => Ok(*n),
-
-        Atom::Sym(sym) => {
-            let bound = s.val.get(sym).ok_or("Unknown symbol")?;
-            match bound.as_ref() {
-                Atom::Num(n) => Ok(*n),
-                _ => Err("Unsupported variable type"),
-            }
-        }
-
-        Atom::Cons(_) => match *eval(v, s)? {
-            Atom::Num(n) => Ok(n),
-            _ => Err("Unsupported type"),
-        },
-
-        _ => Err("Unsupported type"),
+        _ => Err("expected number"),
     }
 }
 
+/// Flattens the last argument of an `apply` call.
+///
+/// For `(apply f args rest...)`, flattens the final list argument
+/// so that all elements become individual arguments.
 #[inline]
 fn flatten_last_apply_arg(list: &SExpr) -> Result<SAtom, &'static str> {
     let mut items: Vec<SAtom> = list.iter().collect();
@@ -124,58 +128,64 @@ fn flatten_last_apply_arg(list: &SExpr) -> Result<SAtom, &'static str> {
     Ok(SExpr::from_satoms(items))
 }
 
+/// Creates a `Fun::Native` from a simple pure function.
+///
+/// The provided function receives already-evaluated arguments and
+/// returns either a result value or an error. This wrapper handles
+/// the conversion to the full `Step` type used by the trampoline.
 #[inline]
-fn args_to_atom(args: &Args) -> SAtom {
-    match args {
-        Args::Nil => Arc::new(Atom::Nil),
-        Args::S(sexpr) => Arc::new(Atom::Cons((*sexpr).clone())),
-    }
+fn native_value<F>(f: F) -> Fun
+where
+    F: Fn(&mut dyn EvaluatorEnv, &Args) -> Result<SAtom, &'static str> + 'static,
+{
+    Fun::Native(Box::new(move |env, args, _stack| {
+        Ok(Step::Value(f(env, args)?))
+    }))
 }
 
+/// Wraps a `Fun` in an `Atom::Fun` and then an `SAtom`.
 #[inline]
-fn call_callable(s: &mut Env, callable: &SAtom, args: &Args) -> EvalResult {
-    let callable_value = match callable.as_ref() {
-        Atom::Fun(_) => callable.clone(),
+fn fun_atom(fun: Fun) -> SAtom {
+    Arc::new(Atom::Fun(Arc::new(fun)))
+}
 
-        Atom::Cons(_) | Atom::Sym(_) => eval(callable.clone(), s)?,
-
-        _ => return Err("first element is not callable"),
-    };
-
-    match apply_callable(callable_value, args_to_atom(args), s) {
-        Err("Only callable values can be used for calling") => {
-            Err("first element is not callable")
-        }
+/// Normalizes error messages from callable application.
+///
+/// Translates the internal "only callable" error to a more user-friendly
+/// "first element is not callable" message.
+#[inline]
+fn normalize_callable_error(r: Result<Step, &'static str>) -> Result<Step, &'static str> {
+    match r {
+        Err("Only callable values can be used for calling") => Err("first element is not callable"),
         other => other,
     }
 }
 
 impl Default for Env {
     fn default() -> Self {
-        let mut fun_map: HashMap<String, Fun> = HashMap::new();
-
         let binary_ops = |op: fn(f64, f64) -> f64| {
-            Fun::Native(Box::new(move |s: &mut Env, args: &Args| {
+            native_value(move |_: &mut dyn EvaluatorEnv, args: &Args| {
                 expect_min_args(args, 2, "expected at least 2 args")?;
 
                 match args {
                     Args::S(args) => {
                         let mut iter = args.iter();
                         let first = iter.next().ok_or("expected at least 2 args")?;
-                        let mut acc = get_num(first, s)?;
+                        let mut acc = get_num_value(first.as_ref())?;
 
                         for v in iter {
-                            acc = op(acc, get_num(v, s)?);
+                            acc = op(acc, get_num_value(v.as_ref())?);
                         }
 
-                        Ok(num!(acc).into())
+                        Ok(crate::num!(acc).into())
                     }
                     Args::Nil => Err("expected at least 2 args"),
                 }
-            }))
+            })
         };
 
-        let car_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| {
+        // `car` - returns the first element of a list.
+        let car_op = native_value(|_: &mut dyn EvaluatorEnv, args: &Args| {
             expect_exact_args(args, 1, "car expects exactly 1 arg")?;
 
             let arg = match args {
@@ -183,14 +193,15 @@ impl Default for Env {
                 Args::Nil => unreachable!(),
             };
 
-            match resolve_value(arg, s) {
-                Some(Atom::Nil) => Ok(nil!().into()),
-                Some(Atom::Cons(list)) => Ok(list.car.clone()),
+            match arg {
+                Atom::Nil => Ok(nil!().into()),
+                Atom::Cons(list) => Ok(list.car.clone()),
                 _ => Err("car expects a list"),
             }
-        }));
+        });
 
-        let cdr_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| {
+        // `cdr` - returns the rest of a list (everything after the first element).
+        let cdr_op = native_value(|_: &mut dyn EvaluatorEnv, args: &Args| {
             expect_exact_args(args, 1, "cdr expects exactly 1 arg")?;
 
             let arg = match args {
@@ -198,96 +209,58 @@ impl Default for Env {
                 Args::Nil => unreachable!(),
             };
 
-            match resolve_value(arg, s) {
-                Some(Atom::Nil) => Ok(nil!().into()),
-                Some(Atom::Cons(list)) => Ok(list.cdr.clone()),
+            match arg {
+                Atom::Nil => Ok(nil!().into()),
+                Atom::Cons(list) => Ok(list.cdr.clone()),
                 _ => Err("cdr expects a list"),
             }
-        }));
+        });
 
-        let lambda_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| {
-            fn parse_lambda_params(v: &Atom) -> Result<Vec<String>, &'static str> {
-                match v {
-                    Atom::Cons(param_list) => {
-                        let mut out = Vec::new();
-                        for p in param_list.iter() {
-                            match p.as_ref() {
-                                Atom::Sym(name) => out.push(name.clone()),
-                                _ => return Err("lambda params must be symbols"),
-                            }
-                        }
-                        Ok(out)
-                    }
-                    Atom::Nil => Ok(vec![]),
-                    _ => Err("lambda expects param list as first arg"),
-                }
-            }
+        // `apply` - applies a function to a list of arguments.
+        // Usage: `(apply fn arg1 arg2 ... last-list)`
+        // The final argument is flattened into the argument list.
+        let apply_op = Fun::Native(Box::new(
+            |s: &mut dyn EvaluatorEnv, args: &Args, stack| -> Result<Step, &'static str> {
+                let (callable, rest) = match args {
+                    Args::S(sexpr) => (sexpr.car.clone(), sexpr.cdr.clone()),
+                    Args::Nil => return Err("apply expects at least a function and one list arg"),
+                };
 
-            expect_exact_args(args, 2, "lambda expects exactly 2 args: params and body")?;
+                let flat_args_atom = match rest.as_ref() {
+                    Atom::Cons(rest_list) => flatten_last_apply_arg(rest_list)?,
+                    Atom::Nil => return Err("apply expects at least a function and one list arg"),
+                    _ => return Err("apply received invalid argument list"),
+                };
 
-            let args = match args {
-                Args::S(args) => *args,
-                Args::Nil => unreachable!(),
-            };
+                normalize_callable_error(apply_callable_step(callable, flat_args_atom, s, stack))
+            },
+        ));
 
-            let (params_val, body_val): (SAtom, SAtom) =
-                take_args!(args; params_val, body_val)
-                    .ok_or("lambda expects exactly 2 args: params and body")?;
+        // `funcall` - calls a function with raw arguments (not evaluated).
+        // Usage: `(funcall fn arg1 arg2 ...)`
+        // Unlike normal function calls, arguments are NOT evaluated before
+        // being passed to the function. This is useful for dynamic dispatch.
+        let funcall_op = Fun::Native(Box::new(
+            |s: &mut dyn EvaluatorEnv, args: &Args, stack| -> Result<Step, &'static str> {
+                let (callable, rest) = match args {
+                    Args::S(sexpr) => (sexpr.car.clone(), sexpr.cdr.clone()),
+                    Args::Nil => return Err("funcall expects at least a function"),
+                };
 
-            let params = parse_lambda_params(params_val.as_ref())?;
+                normalize_callable_error(apply_callable_step(callable, rest, s, stack))
+            },
+        ));
 
-            let user_fn = UserFn {
-                params,
-                body: body_val,
-                captured_val: s.val.clone(),
-            };
-
-            Ok(Arc::new(Atom::Fun(Arc::new(Fun::User(user_fn)))))
-        }));
-
-        let apply_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| -> EvalResult {
-            let (callable, rest) = match args {
-                Args::S(sexpr) => (sexpr.car.clone(), sexpr.cdr.clone()),
-                Args::Nil => return Err("apply expects at least a function and one list arg"),
-            };
-
-            let flat_args_atom = match rest.as_ref() {
-                Atom::Cons(rest_list) => flatten_last_apply_arg(rest_list)?,
-                Atom::Nil => return Err("apply expects at least a function and one list arg"),
-                _ => return Err("apply received invalid argument list"),
-            };
-
-            let flat_args = atom_to_args(flat_args_atom.as_ref())?;
-            call_callable(s, &callable, &flat_args)
-        }));
-
-        let funcall_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| -> EvalResult {
-            let (callable, rest) = match args {
-                Args::S(sexpr) => (sexpr.car.clone(), sexpr.cdr.clone()),
-                Args::Nil => return Err("funcall expects at least a function"),
-            };
-
-            let fn_args = atom_to_args(rest.as_ref())?;
-            call_callable(s, &callable, &fn_args)
-        }));
-
-        let list_op = Fun::Native(Box::new(|_: &mut Env, args: &Args| -> EvalResult {
+        // `list` - constructs a list from its arguments.
+        let list_op = native_value(|_: &mut dyn EvaluatorEnv, args: &Args| -> EvalResult {
             match args {
                 Args::S(sexpr) => Ok(Arc::new(Atom::Cons((*sexpr).clone()))),
                 Args::Nil => Ok(SExpr::empty_list()),
             }
-        }));
+        });
 
-        let quote_op = Fun::Native(Box::new(|_: &mut Env, args: &Args| -> EvalResult {
-            expect_exact_args(args, 1, "quote expects exactly 1 arg")?;
-
-            match args {
-                Args::S(sexpr) => Ok(sexpr.car.clone()),
-                Args::Nil => unreachable!(),
-            }
-        }));
-
-        let cons_op = Fun::Native(Box::new(|_: &mut Env, args: &Args| -> EvalResult {
+        // `cons` - constructs a pair (cons cell).
+        let cons_op = native_value(|_: &mut dyn EvaluatorEnv, args: &Args| -> EvalResult {
             expect_exact_args(args, 2, "cons expects exactly 2 args")?;
 
             match args {
@@ -305,27 +278,10 @@ impl Default for Env {
                 }
                 Args::Nil => unreachable!(),
             }
-        }));
+        });
 
-        let if_op = Fun::Native(Box::new(|s: &mut Env, args: &Args| -> EvalResult {
-            expect_exact_args(args, 3, "if expects exactly 3 args")?;
-
-            match args {
-                Args::S(sexpr) => {
-                    let (test, t_body, f_body) = take_args!(sexpr; test, t_body, f_body)
-                        .ok_or("if expects exactly 3 args")?;
-
-                    if *eval(test, s)? != Atom::Nil {
-                        eval(t_body, s)
-                    } else {
-                        eval(f_body, s)
-                    }
-                }
-                Args::Nil => unreachable!(),
-            }
-        }));
-
-        let eq_op = Fun::Native(Box::new(|_: &mut Env, args: &Args| -> EvalResult {
+        // `eq` - tests equality of two values (identity comparison).
+        let eq_op = native_value(|_: &mut dyn EvaluatorEnv, args: &Args| -> EvalResult {
             expect_exact_args(args, 2, "eq expects exactly 2 args")?;
 
             match args {
@@ -341,30 +297,25 @@ impl Default for Env {
                 }
                 Args::Nil => unreachable!(),
             }
-        }));
-
-        fun_map.insert("add".into(), binary_ops(|a, b| a + b));
-        fun_map.insert("mul".into(), binary_ops(|a, b| a * b));
-        fun_map.insert("sub".into(), binary_ops(|a, b| a - b));
-        fun_map.insert("div".into(), binary_ops(|a, b| a / b));
-        fun_map.insert("car".into(), car_op);
-        fun_map.insert("cdr".into(), cdr_op);
-        fun_map.insert("list".into(), list_op);
-        fun_map.insert("quote".into(), quote_op);
-        fun_map.insert("lambda".into(), lambda_op);
-        fun_map.insert("apply".into(), apply_op);
-        fun_map.insert("funcall".into(), funcall_op);
-        fun_map.insert("cons".into(), cons_op);
-        fun_map.insert("if".into(), if_op);
-        fun_map.insert("eq".into(), eq_op);
+        });
 
         let mut val_map = HashMap::new();
+
         val_map.insert("nil".into(), nil!().into());
         val_map.insert("t".into(), t!().into());
 
-        Self {
-            fun: Arc::new(fun_map),
-            val: val_map,
-        }
+        val_map.insert("add".into(), fun_atom(binary_ops(|a, b| a + b)));
+        val_map.insert("mul".into(), fun_atom(binary_ops(|a, b| a * b)));
+        val_map.insert("sub".into(), fun_atom(binary_ops(|a, b| a - b)));
+        val_map.insert("div".into(), fun_atom(binary_ops(|a, b| a / b)));
+        val_map.insert("car".into(), fun_atom(car_op));
+        val_map.insert("cdr".into(), fun_atom(cdr_op));
+        val_map.insert("list".into(), fun_atom(list_op));
+        val_map.insert("apply".into(), fun_atom(apply_op));
+        val_map.insert("funcall".into(), fun_atom(funcall_op));
+        val_map.insert("cons".into(), fun_atom(cons_op));
+        val_map.insert("eq".into(), fun_atom(eq_op));
+
+        Self { val: val_map }
     }
 }

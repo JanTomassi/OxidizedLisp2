@@ -58,7 +58,7 @@ fn parse_sexp(input: &str) -> IResult<&str, Atom> {
             Atom::Cons(SExpr {
                 car: SAtom::new(item),
                 cdr: SAtom::new(tail),
-                len: len+1,
+                len: len + 1,
             })
         },
     );

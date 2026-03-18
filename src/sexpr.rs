@@ -1,17 +1,24 @@
 use std::{
     fmt::{self, Debug, Formatter},
     ops::Index,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 use crate::atom::{Atom, SAtom};
 
+/// S-Expression (cons cell / list).
+///
+/// A cons cell has a `car` (first element) and `cdr` (rest of list).
+/// Lists are chains of cons cells ending in nil. The `len` field caches
+/// the length for O(1) length checks.
 #[derive(PartialEq, Clone)]
 pub struct SExpr {
     pub car: SAtom,
     pub cdr: SAtom,
     pub len: usize,
 }
+
+impl Eq for SExpr {}
 
 impl SExpr {
     pub fn get(&self, index: usize) -> Option<&Atom> {
@@ -42,8 +49,7 @@ impl SExpr {
 
     #[inline]
     fn nil_atom() -> SAtom {
-        static NIL: OnceLock<SAtom> = OnceLock::new();
-        Arc::clone(NIL.get_or_init(|| Arc::new(Atom::Nil)))
+        Arc::new(Atom::Nil)
     }
 
     #[inline]
@@ -120,7 +126,7 @@ pub struct SExprIter<'a> {
 }
 
 #[derive(Copy, Clone)]
-pub(crate) enum Cursor<'a> {
+pub enum Cursor<'a> {
     Done,
     Cell(&'a SExpr),
     Tail(&'a SAtom),

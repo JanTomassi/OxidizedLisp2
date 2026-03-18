@@ -4,12 +4,9 @@ mod env;
 mod lisp_eval;
 mod lisp_parsing;
 mod sexpr;
+mod types;
 
-use std::{
-    fs,
-    process::exit,
-    sync::Arc,
-};
+use std::{fs, process::exit, sync::Arc};
 
 use atom::Atom;
 use env::Env;
