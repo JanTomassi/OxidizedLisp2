@@ -18,68 +18,75 @@ use lisp_parsing::parse;
 
 use rustyline::{error::ReadlineError, DefaultEditor};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = ReplState {
-        loaded_file: None,
-        loaded_text: String::new(),
-        env: Env::default(),
-    };
+fn main() {
+    let env = &mut Env::default();
+    let parsed_input = parse("(apply (lambda (a b) (add a b)) (list 1 2))");
+    let eval_res = (*eval(parsed_input.into(), env).unwrap()).clone();
+    assert_eq!(eval_res, num!(3));
 
-    if let Some(input_file) = std::env::args().nth(1) {
-        if let Err(e) = load_file(&input_file, &mut state) {
-            eprintln!("error loading {input_file}: {e}");
-            exit(1);
-        }
-        println!("Loaded file: {input_file}");
-    }
+    // Ok(())
 
-    let mut rl = DefaultEditor::new()?; // enables line editing (Up/Down history, etc.)
-    let hist_path = ".myrepl_history";
+    // let mut state = ReplState {
+    //     loaded_file: None,
+    //     loaded_text: String::new(),
+    //     env: Env::default(),
+    // };
 
-    // Persistent history across runs (feature is enabled by default in rustyline). :contentReference[oaicite:2]{index=2}
-    let _ = rl.load_history(hist_path);
+    // if let Some(input_file) = std::env::args().nth(1) {
+    //     if let Err(e) = load_file(&input_file, &mut state) {
+    //         eprintln!("error loading {input_file}: {e}");
+    //         exit(1);
+    //     }
+    //     println!("Loaded file: {input_file}");
+    // }
 
-    loop {
-        match rl.readline("> ") {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
+    // let mut rl = DefaultEditor::new()?; // enables line editing (Up/Down history, etc.)
+    // let hist_path = ".myrepl_history";
 
-                // store in history so Up/Down works immediately
-                let _ = rl.add_history_entry(line);
+    // // Persistent history across runs (feature is enabled by default in rustyline). :contentReference[oaicite:2]{index=2}
+    // let _ = rl.load_history(hist_path);
 
-                if line.starts_with(":") {
-                    if handle_command(line, &mut state) {
-                        break;
-                    } else {
-                        continue;
-                    }
-                }
+    // loop {
+    //     match rl.readline("> ") {
+    //         Ok(line) => {
+    //             let line = line.trim();
+    //             if line.is_empty() {
+    //                 continue;
+    //             }
 
-                let input = parse(&line);
-                let res = eval(input.into(), &mut state.env);
-                match res {
-                    Ok(atom) => println!("=> {:#?}", atom),
-                    Err(err) => println!("!> {}", err),
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                break;
-            }
-            Err(ReadlineError::Eof) => {
-                break;
-            }
-            Err(err) => {
-                eprintln!("readline error: {err:?}");
-                break;
-            }
-        }
-    }
+    //             // store in history so Up/Down works immediately
+    //             let _ = rl.add_history_entry(line);
 
-    let _ = rl.save_history(hist_path);
-    Ok(())
+    //             if line.starts_with(":") {
+    //                 if handle_command(line, &mut state) {
+    //                     break;
+    //                 } else {
+    //                     continue;
+    //                 }
+    //             }
+
+    //             let input = parse(&line);
+    //             let res = eval(input.into(), &mut state.env);
+    //             match res {
+    //                 Ok(atom) => println!("=> {:#?}", atom),
+    //                 Err(err) => println!("!> {}", err),
+    //             }
+    //         }
+    //         Err(ReadlineError::Interrupted) => {
+    //             break;
+    //         }
+    //         Err(ReadlineError::Eof) => {
+    //             break;
+    //         }
+    //         Err(err) => {
+    //             eprintln!("readline error: {err:?}");
+    //             break;
+    //         }
+    //     }
+    // }
+
+    // let _ = rl.save_history(hist_path);
+    // Ok(())
 }
 
 struct ReplState {

@@ -1,15 +1,18 @@
 use crate::{
     env::Env,
     lisp_eval::{Args, EvalResult},
-    sexpr::SExpr,
+    sexpr::{SExpr, SExprIter, Cursor},
 };
-use std::{fmt::Debug, ptr, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, ptr, sync::Arc};
 
 pub type NativeFn = Box<dyn Fn(&mut Env, &Args) -> EvalResult + Send + Sync>;
-pub type UserFn = Box<(
-    SAtom,
-    Box<dyn Fn(&mut Env, &Args) -> EvalResult + Send + Sync>,
-)>;
+#[derive(Clone, PartialEq)]
+pub struct UserFn {
+    pub params: Vec<String>,
+    pub body: SAtom,
+    pub captured_val: HashMap<String, SAtom>,
+}
+
 pub type SAtom = Arc<Atom>;
 
 pub enum Fun {
@@ -21,7 +24,7 @@ impl Fun {
     pub fn call(&self, env: &mut Env, args: &Args) -> EvalResult {
         match self {
             Fun::Native(s_fun) => s_fun(env, args),
-            Fun::User(s_fun) => s_fun.1(env, args),
+            Fun::User(_) => Err("internal error: user functions must be applied by evaluator"),
         }
     }
 }
@@ -37,6 +40,38 @@ pub enum Atom {
     Fun(Arc<Fun>),
 }
 
+impl Atom {
+    pub fn list_get(&self, index: usize) -> Option<&Atom> {
+        match self {
+            Atom::Nil => None,
+            Atom::Cons(sexpr) => sexpr.get(index),
+            _ => None,
+        }
+    }
+
+    pub fn list_iter(&self) -> SExprIter<'_> {
+        match self {
+            Atom::Nil => SExprIter {
+                cursor: Cursor::Done,
+            },
+            Atom::Cons(sexpr) => sexpr.iter(),
+            _ => panic!("not a list"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct List(pub SAtom);
+
+impl<T> FromIterator<T> for List
+where
+    T: Into<SAtom>,
+{
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        List(SExpr::from_satoms(iter.into_iter().map(Into::into)))
+    }
+}
+
 impl PartialEq for Atom {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -48,7 +83,7 @@ impl PartialEq for Atom {
 
             (Atom::Fun(a), Atom::Fun(b)) => match (&**a, &**b) {
                 (Fun::Native(a), Fun::Native(b)) => ptr::eq(&**a, &**b),
-                (Fun::User(a), Fun::User(b)) => a.0 == b.0,
+                (Fun::User(a), Fun::User(b)) => a == b,
                 _ => false,
             },
             _ => false,
@@ -79,7 +114,7 @@ impl Debug for Atom {
             Atom::Cons(sexpr) => sexpr.fmt(f),
             Atom::Fun(fun) => match &**fun {
                 Fun::Native(_) => write!(f, "NativeFn"),
-                Fun::User(fun) => write!(f, "{:#?}", fun.0),
+                Fun::User(fun) => write!(f, "[{:#?} | {:#?}]", fun.params, fun.body),
             },
         }
     }

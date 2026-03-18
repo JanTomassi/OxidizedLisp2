@@ -6,13 +6,16 @@ macro_rules! num {
         r
     }};
 }
+
 #[macro_export]
 macro_rules! str {
     ($x:expr) => {{
+        use crate::atom::Atom;
         let r: Atom = Atom::Str(($x).into());
         r
     }};
 }
+
 #[macro_export]
 macro_rules! sym {
     ($x:expr) => {{
@@ -21,6 +24,7 @@ macro_rules! sym {
         r
     }};
 }
+
 #[macro_export]
 macro_rules! nil {
     () => {{
@@ -29,6 +33,7 @@ macro_rules! nil {
         r
     }};
 }
+
 #[macro_export]
 macro_rules! t {
     () => {{
@@ -37,32 +42,41 @@ macro_rules! t {
         r
     }};
 }
+
 #[macro_export]
 macro_rules! sexpr {
     // empty list
-    () => {
+    () => {{
         use crate::atom::Atom;
         Atom::Nil
-    };
+    }};
 
-    // one or more elements (atoms or vals), comma-separated
+    // one or more elements
     ($($x:expr),+ $(,)?) => {{
-        use crate::atom::Atom;
-        let r: Atom = Atom::Cons(vec![ $( ($x) ),+ ].into_iter().collect());
-        r
+        use crate::sexpr::SExpr;
+        (*SExpr::from_atoms(vec![$($x),+])).clone()
     }};
 }
 
 #[macro_export]
 macro_rules! cons {
-    // two elements (atoms or vals), comma-separated
     ($car:expr, $cdr:expr $(,)?) => {{
         use crate::atom::Atom;
         use crate::sexpr::SExpr;
-        let r: Atom = Atom::Cons(SExpr {
-            car: ($car).into(),
-            cdr: ($cdr).into(),
-        });
-        r
+
+        let car = $car;
+        let cdr = $cdr;
+
+        let len = 1 + match &cdr {
+            Atom::Nil => 0,
+            Atom::Cons(sexpr) => sexpr.len,
+            _ => 1,
+        };
+
+        Atom::Cons(SExpr {
+            car: car.into(),
+            cdr: cdr.into(),
+            len,
+        })
     }};
 }

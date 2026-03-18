@@ -52,15 +52,16 @@ fn parse_sym(input: &str) -> IResult<&str, Atom> {
 fn parse_sexp(input: &str) -> IResult<&str, Atom> {
     let p = delimited(char('('), many0(parse_atom), char(')')).parse(input)?;
     let args = p.1;
-    let sexpr = args
-        .into_iter()
-        .rev()
-        .fold(Atom::default(), |tail, item: Atom| {
+    let sexpr = args.into_iter().rev().enumerate().fold(
+        Atom::default(),
+        |tail, (len, item): (usize, Atom)| {
             Atom::Cons(SExpr {
                 car: SAtom::new(item),
                 cdr: SAtom::new(tail),
+                len: len+1,
             })
-        });
+        },
+    );
 
     Ok((p.0, sexpr))
 }
@@ -92,11 +93,16 @@ mod tests {
 
     #[test]
     fn test_sexp() {
-        assert_eq!(parse_atom("()").unwrap().1, nil!());
-        assert_eq!(parse_atom("(sym)").unwrap().1, sexpr!(sym!("sym")));
-        assert_eq!(
-            parse_atom("(add 1 2)").unwrap().1,
-            sexpr!(sym!("add"), num!(1), num!(2),)
-        );
+        let tests = [
+            (parse_atom("()").unwrap().1, nil!()),
+            (parse_atom("(sym)").unwrap().1, sexpr!(sym!("sym"))),
+            (
+                parse_atom("(add 1 2)").unwrap().1,
+                sexpr!(sym!("add"), num!(1), num!(2),),
+            ),
+        ];
+        for (res, t) in tests {
+            assert_eq!(res, t);
+        }
     }
 }
