@@ -6,150 +6,236 @@ mod lisp_parsing;
 mod sexpr;
 mod types;
 
-use std::{fs, process::exit, sync::Arc};
+use std::cell::RefCell;
 
-use atom::Atom;
+use rustyline::DefaultEditor;
+use rustyline::Result as RlResult;
+
 use env::Env;
 use lisp_eval::eval;
 use lisp_parsing::parse;
 
-use rustyline::{error::ReadlineError, DefaultEditor};
-
-fn main() {
-    let env = &mut Env::default();
-    let parsed_input = parse("(apply (lambda (a b) (add a b)) (list 1 2))");
-    let eval_res = (*eval(parsed_input.into(), env).unwrap()).clone();
-    assert_eq!(eval_res, num!(3));
-
-    // Ok(())
-
-    // let mut state = ReplState {
-    //     loaded_file: None,
-    //     loaded_text: String::new(),
-    //     env: Env::default(),
-    // };
-
-    // if let Some(input_file) = std::env::args().nth(1) {
-    //     if let Err(e) = load_file(&input_file, &mut state) {
-    //         eprintln!("error loading {input_file}: {e}");
-    //         exit(1);
-    //     }
-    //     println!("Loaded file: {input_file}");
-    // }
-
-    // let mut rl = DefaultEditor::new()?; // enables line editing (Up/Down history, etc.)
-    // let hist_path = ".myrepl_history";
-
-    // // Persistent history across runs (feature is enabled by default in rustyline). :contentReference[oaicite:2]{index=2}
-    // let _ = rl.load_history(hist_path);
-
-    // loop {
-    //     match rl.readline("> ") {
-    //         Ok(line) => {
-    //             let line = line.trim();
-    //             if line.is_empty() {
-    //                 continue;
-    //             }
-
-    //             // store in history so Up/Down works immediately
-    //             let _ = rl.add_history_entry(line);
-
-    //             if line.starts_with(":") {
-    //                 if handle_command(line, &mut state) {
-    //                     break;
-    //                 } else {
-    //                     continue;
-    //                 }
-    //             }
-
-    //             let input = parse(&line);
-    //             let res = eval(input.into(), &mut state.env);
-    //             match res {
-    //                 Ok(atom) => println!("=> {:#?}", atom),
-    //                 Err(err) => println!("!> {}", err),
-    //             }
-    //         }
-    //         Err(ReadlineError::Interrupted) => {
-    //             break;
-    //         }
-    //         Err(ReadlineError::Eof) => {
-    //             break;
-    //         }
-    //         Err(err) => {
-    //             eprintln!("readline error: {err:?}");
-    //             break;
-    //         }
-    //     }
-    // }
-
-    // let _ = rl.save_history(hist_path);
-    // Ok(())
+thread_local! {
+    static REPL_ENV: RefCell<Option<std::sync::Arc<Env>>> = RefCell::new(None);
 }
 
-struct ReplState {
-    loaded_file: Option<String>,
-    loaded_text: String,
-    env: Env,
+fn init_repl_env() {
+    REPL_ENV.with(|env| {
+        *env.borrow_mut() = Some(std::sync::Arc::new(Env::root()));
+    });
 }
 
-fn load_file(path: &str, state: &mut ReplState) -> Result<Arc<Atom>, &'static str> {
-    let contents = fs::read_to_string(path);
-    state.loaded_file = Some(path.to_string());
-    state.loaded_text = contents.or_else(|_| Err("Coundn't load input file"))?;
-    eval(parse(&state.loaded_text).into(), &mut state.env)
+fn with_repl_env<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut std::sync::Arc<Env>) -> R,
+{
+    REPL_ENV.with(|env| {
+        let mut env_ref = env.borrow_mut();
+        let env = env_ref.as_mut().unwrap();
+        f(env)
+    })
 }
 
-// Return `true` to exit the REPL.
-fn handle_command(cmdline: &str, state: &mut ReplState) -> bool {
-    let mut parts = cmdline.split_whitespace();
-    let cmd = parts.next().unwrap_or("");
+fn print_welcome() {
+    println!("╔══════════════════════════════════════════╗");
+    println!("║         Lisp REPL - Type :help          ║");
+    println!("║           (Press Ctrl+D to exit)        ║");
+    println!("╚══════════════════════════════════════════╝");
+    println!();
+}
+
+fn print_help() {
+    println!(
+        "\
+Commands:
+  :help, :h           Show this help message
+  :quit, :q, Ctrl+D   Exit the REPL
+  :env, :e            Show all defined variables
+  :info, :i           Show REPL info and stats
+  :clear, :cl         Clear the screen
+
+Lisp Features:
+  Numbers:     42, 3.14, -7
+  Strings:     \"hello world\"
+  Symbols:     foo, my-var, add
+  Lists:       (1 2 3), (add x y)
+  Quote:       (quote (a b c)) or '(a b c)
+  Lambda:      (lambda (x) (add x 1))
+  If:          (if condition then-expr else-expr)
+  Def:         (def name value)
+  Labels:      (labels ((f (x) body)) (f arg)) - local recursive functions
+  Set!:        (set! name value) - modify existing variable
+
+Builtins:
+  Arithmetic:  add, sub, mul, div
+  Lists:       list, cons, car, cdr
+  Comparison:  eq
+  Control:     apply, funcall
+
+Examples:
+  > (add 1 2 3)
+  => 6
+  > (def x 42)
+  => 42
+  > (labels ((double (x) (mul x 2))) (double 21))
+  => 42
+  > (labels ((fact (n) (if (eq n 0) 1 (mul n (fact (sub n 1)))))) (fact 5))
+  => 120
+  > (labels ((fib (n) (if (eq n 0) 0 (if (eq n 1) 1 (add (fib (sub n 1)) (fib (sub n 2))))))) (fib 10))
+  => 55"
+    );
+}
+
+fn print_env() {
+    with_repl_env(|env| {
+        println!("Defined variables:");
+        let mut bindings: Vec<_> = env.local.iter().collect();
+        bindings.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, value) in bindings {
+            if !matches!(value.as_ref(), atom::Atom::Fun(_)) {
+                println!("  {} => {:?}", name, value.as_ref());
+            }
+        }
+    });
+}
+
+fn print_info() {
+    println!("REPL Info:");
+    println!("  Version: 0.1.0");
+    with_repl_env(|env| {
+        println!("  Variables: {}", env.local.len());
+    });
+}
+
+fn handle_command(line: &str) -> Option<bool> {
+    let mut parts = line.split_whitespace();
+    let cmd = parts.next()?.trim_start_matches(':');
 
     match cmd {
-        ":q" | ":quit" => true,
-        ":help" => {
-            println!(
-                "\
-Commands:
-  :help            Show this help
-  :quit | :q       Exit
-  :load <path>     Load a file into the REPL state
-  :show            Print currently loaded file text (if any)
-  :clear           Clear loaded file/text
-Anything else is sent to eval()."
-            );
-            false
+        "q" | "quit" => Some(true),
+        "h" | "help" => {
+            print_help();
+            None
         }
-        ":load" => {
-            let path = match parts.next() {
-                Some(p) => p,
-                None => {
-                    eprintln!("usage: :load <path>");
-                    return false;
-                }
-            };
-            match load_file(path, state) {
-                Ok(r) => println!("Loaded file result:\n{r:#?}"),
-                Err(e) => eprintln!("error loading {path}: {e}"),
-            }
-            false
+        "e" | "env" => {
+            print_env();
+            None
         }
-        ":show" => {
-            if let Some(p) = &state.loaded_file {
-                println!("--- {p} ---\n{}", state.loaded_text);
-            } else {
-                println!("(no file loaded)");
-            }
-            false
+        "i" | "info" => {
+            print_info();
+            None
         }
-        ":clear" => {
-            state.loaded_file = None;
-            state.loaded_text.clear();
-            println!("Cleared.");
-            false
+        "cl" | "clear" => {
+            print!("\x1B[2J\x1B[H");
+            None
         }
         _ => {
-            eprintln!("unknown command: {cmd} (try :help)");
-            false
+            eprintln!("Unknown command: :{cmd} (try :help)");
+            None
         }
+    }
+}
+
+fn eval_and_print(line: &str) {
+    let parsed = parse(line);
+    with_repl_env(|env| match eval(parsed.clone().into(), env) {
+        Ok(val) => {
+            println!("=> {:?}", val.as_ref());
+        }
+        Err(e) => {
+            eprintln!("!> Error: {e}");
+        }
+    });
+}
+
+fn run_repl() -> RlResult<()> {
+    init_repl_env();
+
+    let hist_path = ".lisp_repl_history";
+    let mut rl = DefaultEditor::new()?;
+
+    if rl.load_history(hist_path).is_err() {
+        println!("(Starting fresh history)");
+    }
+
+    print_welcome();
+
+    let mut input_buffer = String::new();
+    let mut paren_depth: i32 = 0;
+
+    loop {
+        let prompt = if input_buffer.is_empty() {
+            "lisp> "
+        } else {
+            "..> "
+        };
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                let line = line.trim();
+
+                if line.is_empty() {
+                    if input_buffer.is_empty() {
+                        continue;
+                    } else {
+                        continue;
+                    }
+                }
+
+                rl.add_history_entry(line)?;
+
+                if line.starts_with(':') && input_buffer.is_empty() {
+                    if let Some(should_quit) = handle_command(line) {
+                        if should_quit {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                let mut this_line_depth: i32 = 0;
+                for c in line.chars() {
+                    if c == '(' {
+                        this_line_depth += 1;
+                    } else if c == ')' {
+                        this_line_depth -= 1;
+                    }
+                }
+                paren_depth += this_line_depth;
+
+                if !input_buffer.is_empty() {
+                    input_buffer.push(' ');
+                }
+                input_buffer.push_str(line);
+
+                if paren_depth <= 0 && !input_buffer.trim().is_empty() {
+                    let full_input = input_buffer.trim().to_string();
+                    input_buffer.clear();
+                    paren_depth = 0;
+                    eval_and_print(&full_input);
+                }
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                if !input_buffer.is_empty() {
+                    let full_input = input_buffer.trim().to_string();
+                    eval_and_print(&full_input);
+                }
+                println!("\nGoodbye!");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Readline error: {:?}", err);
+                break;
+            }
+        }
+    }
+
+    rl.save_history(hist_path).ok();
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run_repl() {
+        eprintln!("REPL error: {:?}", e);
     }
 }

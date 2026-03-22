@@ -1,55 +1,38 @@
 //! Core data types for the Lisp interpreter.
-//!
-//! This module defines the fundamental data structures:
-//! - [`Atom`]: The enum of all value types in the language
-//! - [`SAtom`]: A shared, thread-safe reference to an Atom (via Arc)
-//! - [`Fun`]: Function values (native or user-defined)
-//! - [`UserFn`]: A user-defined lambda with captured environment
 
-use std::{collections::HashMap, fmt::Debug, ptr, sync::Arc};
+use std::{fmt::Debug, ptr, sync::Arc};
 
-use crate::env::EvaluatorEnv;
+use crate::env::Env;
 use crate::sexpr::SExpr;
 use crate::types::{Args, Frame, Step};
 
 /// A user-defined function (lambda).
 ///
-/// User functions capture the lexical environment at definition time,
-/// forming closures. The captured environment is stored in `captured_val`
-/// and restored when the function returns.
-#[derive(Clone, PartialEq)]
+/// Captures the lexical environment as an Arc for efficient closure semantics.
+#[derive(Clone, PartialEq, Debug)]
 pub struct UserFn {
     pub params: Vec<String>,
     pub body: SAtom,
-    pub captured_val: HashMap<String, SAtom>,
+    pub captured_env: Arc<Env>,
 }
 
-/// Shared reference to an Atom.
-///
-/// Using Arc allows multiple parts of the evaluator to share values
-/// without cloning, and enables efficient constant values like nil and t.
 pub type SAtom = Arc<Atom>;
 
-/// Function values.
-///
-/// Functions can be either:
-/// - Native: implemented in Rust for performance or I/O
-/// - User: defined in Lisp as lambdas, capturing lexical scope
 pub enum Fun {
     Native(
-        Box<dyn Fn(&mut dyn EvaluatorEnv, &Args, &mut Vec<Frame>) -> Result<Step, &'static str>>,
+        Box<
+            dyn Fn(&mut Arc<Env>, &Args, &mut Vec<Frame>) -> Result<Step, &'static str>
+                + Send
+                + Sync,
+        >,
     ),
     User(UserFn),
 }
 
 impl Fun {
-    /// Calls a native function, returning a Step.
-    ///
-    /// User functions must be applied by the evaluator's trampoline loop,
-    /// so this method only handles native functions.
     pub fn call(
         &self,
-        env: &mut dyn EvaluatorEnv,
+        env: &mut Arc<Env>,
         args: &Args,
         stack: &mut Vec<Frame>,
     ) -> Result<Step, &'static str> {
@@ -60,15 +43,6 @@ impl Fun {
     }
 }
 
-/// The fundamental value type in the Lisp runtime.
-///
-/// Atoms can be:
-/// - `T` / `Nil`: boolean-like constants
-/// - `Num`: floating-point numbers
-/// - `Str`: strings
-/// - `Sym`: symbols (identifiers)
-/// - `Cons`: cons cells (pairs/lists)
-/// - `Fun`: function values (native or user)
 #[derive(Clone)]
 pub enum Atom {
     T,
@@ -80,50 +54,6 @@ pub enum Atom {
     Fun(Arc<Fun>),
 }
 
-impl Atom {
-    /// Gets an element from a list by index.
-    ///
-    /// Returns `None` if the index is out of bounds or if this atom
-    /// is not a proper list.
-    pub fn list_get(&self, index: usize) -> Option<&Atom> {
-        match self {
-            Atom::Nil => None,
-            Atom::Cons(sexpr) => sexpr.get(index),
-            _ => None,
-        }
-    }
-
-    /// Returns an iterator over the elements of a list.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this atom is not a list (Cons or Nil).
-    pub fn list_iter(&self) -> crate::sexpr::SExprIter<'_> {
-        match self {
-            Atom::Nil => crate::sexpr::SExprIter {
-                cursor: crate::sexpr::Cursor::Done,
-            },
-            Atom::Cons(sexpr) => sexpr.iter(),
-            _ => panic!("not a list"),
-        }
-    }
-}
-
-/// A list wrapper for convenience iteration.
-#[derive(Clone, PartialEq, Debug)]
-pub struct List(pub SAtom);
-
-impl<T> FromIterator<T> for List
-where
-    T: Into<SAtom>,
-{
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        List(crate::sexpr::SExpr::from_satoms(
-            iter.into_iter().map(Into::into),
-        ))
-    }
-}
-
 impl PartialEq for Atom {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -132,7 +62,6 @@ impl PartialEq for Atom {
             (Atom::Str(a), Atom::Str(b)) => a == b,
             (Atom::Sym(a), Atom::Sym(b)) => a == b,
             (Atom::Cons(a), Atom::Cons(b)) => a == b,
-
             (Atom::Fun(a), Atom::Fun(b)) => match (&**a, &**b) {
                 (Fun::Native(a), Fun::Native(b)) => ptr::eq(&**a, &**b),
                 (Fun::User(a), Fun::User(b)) => a == b,
