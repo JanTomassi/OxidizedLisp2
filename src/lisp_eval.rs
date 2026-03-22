@@ -47,7 +47,7 @@ fn apply_user_fun(
 
     let saved_env = env.clone();
 
-    let mut new_env = Env::with_parent(env.clone());
+    let mut new_env = Env::with_parent(user.captured_env.clone());
 
     for (name, value) in user.params.iter().zip(actuals) {
         new_env.local.insert(name.clone(), value);
@@ -174,7 +174,7 @@ fn special_lambda(raw_args: SAtom, env: &Arc<Env>) -> Result<Step, &'static str>
             let user_fn = UserFn {
                 params,
                 body: body_val,
-                captured_env: env.clone(),
+                captured_env: Arc::new(Env::with_parent(env.clone())),
             };
             Ok(Step::Value(crate::atom::SAtom::new(Atom::Fun(Arc::new(
                 Fun::User(user_fn),
@@ -372,7 +372,7 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                 };
             }
 
-            Step::Value(value) => match stack.pop() {
+            Step::Value(mut value) => match stack.pop() {
                 None => return Ok(value),
 
                 Some(Frame::RestoreEnv { env: saved_env }) => {
@@ -442,9 +442,9 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                     saved_env: _,
                 }) => {
                     if current_idx < bindings.len() {
-                        let (name, lambda_val) = &bindings[current_idx];
+                        let (name, lambda_val) = &bindings[current_idx].clone();
                         stack.push(Frame::Labels {
-                            bindings: bindings.clone(),
+                            bindings: bindings,
                             current_idx: current_idx + 1,
                             body,
                             saved_env: env.clone(),
@@ -457,7 +457,19 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                 }
 
                 Some(Frame::LabelsEvalBody { name }) => {
-                    Env::insert(env, name.clone(), value.clone());
+                    let lambda = Arc::get_mut(&mut value).unwrap();
+                    match lambda {
+                        Atom::Fun(fun) => match Arc::get_mut(fun).unwrap() {
+                            Fun::User(user_fn) => {
+                                let mut env = user_fn.captured_env.clone();
+                                Env::insert(&mut env, name.clone(), value.clone());
+                                eprintln!("DEBUG LabelsEvalBody env {:#?}", env);
+                            }
+                            Fun::Native(_) => unreachable!(),
+                        },
+                        _ => return Err("Label does not contain a function"),
+                    };
+                    Env::insert(env, name, value.clone());
                     step = Step::Value(value);
                 }
             },
