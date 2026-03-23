@@ -4,42 +4,8 @@
 //! the captured environment is stored as an Arc, allowing O(1) environment
 //! saves/restores via Arc cloning instead of deep-cloning HashMaps.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use std::thread_local;
-
-thread_local! {
-    pub static REPL_ENV: RefCell<Arc<Env>> = RefCell::new(Arc::new(Env::root()));
-}
-
-pub fn get_repl_env() -> Arc<Env> {
-    REPL_ENV.with(|env| env.borrow().clone())
-}
-
-pub fn set_repl_env(env: Arc<Env>) {
-    REPL_ENV.with(|re| *re.borrow_mut() = env);
-}
-
-pub fn repl_insert(name: String, value: SAtom) {
-    REPL_ENV.with(|re| {
-        let mut repl = re.borrow_mut();
-        let new_env = Arc::make_mut(&mut repl);
-        new_env.local.insert(name, value);
-    });
-}
-
-pub fn repl_lookup(name: &str) -> Option<SAtom> {
-    REPL_ENV.with(|env| env.borrow().lookup(name))
-}
-
-pub fn repl_define(name: String, value: SAtom) {
-    REPL_ENV.with(|re| {
-        let mut repl = re.borrow_mut();
-        Arc::make_mut(&mut repl).local.insert(name, value);
-    });
-}
+use std::sync::{Arc, OnceLock};
 
 use crate::atom::{Atom, Fun, SAtom};
 use crate::lisp_eval::apply_callable_step;
@@ -56,7 +22,7 @@ use crate::types::{Args, EvalResult, Step};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Env {
     pub(crate) parent: Option<Arc<Env>>,
-    pub(crate) local: HashMap<String, SAtom>,
+    pub(crate) local: HashMap<String, OnceLock<SAtom>>,
 }
 
 impl Env {
@@ -79,22 +45,36 @@ impl Env {
     /// Looks up a name in the environment chain.
     #[inline]
     pub fn lookup(&self, name: &str) -> Option<SAtom> {
-        self.local
-            .get(name)
-            .cloned()
-            .or_else(|| self.parent.as_ref()?.lookup(name))
+        let hashmap_val = self.local.get(name);
+        let val_map = hashmap_val.map(|tunk| tunk.get());
+        let rec_res = match val_map {
+            Some(v) => v.cloned(),
+            None => match &self.parent {
+                Some(parent) => parent.lookup(name),
+                None => None,
+            },
+        };
+        rec_res
+    }
+
+    #[inline]
+    pub fn record(env: &mut Arc<Env>, name: String) {
+        Arc::make_mut(env).local.insert(name, OnceLock::new());
+    }
+
+    #[inline]
+    pub fn set(env: &Arc<Env>, name: String, value: SAtom) -> Result<(), &'static str> {
+        env.local
+            .get(&name)
+            .ok_or_else(|| "Can't init not recorded")?
+            .set(value)
+            .or_else(|_| Err("Can't set OnceLock"))?;
+        Ok(())
     }
 
     #[inline]
     pub fn insert(env: &mut Arc<Env>, name: String, value: SAtom) {
-        Arc::make_mut(env).local.insert(name, value);
-    }
-
-    /// Gets a mutable reference to local bindings.
-    /// Uses Arc::make_mut for copy-on-write semantics.
-    #[inline]
-    pub fn local_mut(env: &mut Arc<Env>) -> &mut HashMap<String, SAtom> {
-        &mut Arc::make_mut(env).local
+        Arc::make_mut(env).local.insert(name, OnceLock::from(value));
     }
 
     fn builtins_init(&mut self) {
@@ -280,23 +260,40 @@ impl Env {
             }
         });
 
-        self.local.insert("nil".into(), nil!().into());
-        self.local.insert("t".into(), t!().into());
         self.local
-            .insert("add".into(), fun_atom(binary_ops(|a, b| a + b)));
+            .insert("nil".into(), OnceLock::from(SAtom::new(nil!())));
         self.local
-            .insert("mul".into(), fun_atom(binary_ops(|a, b| a * b)));
+            .insert("t".into(), OnceLock::from(SAtom::new(t!())));
+        self.local.insert(
+            "add".into(),
+            OnceLock::from(fun_atom(binary_ops(|a, b| a + b))),
+        );
+        self.local.insert(
+            "mul".into(),
+            OnceLock::from(fun_atom(binary_ops(|a, b| a * b))),
+        );
+        self.local.insert(
+            "sub".into(),
+            OnceLock::from(fun_atom(binary_ops(|a, b| a - b))),
+        );
+        self.local.insert(
+            "div".into(),
+            OnceLock::from(fun_atom(binary_ops(|a, b| a / b))),
+        );
         self.local
-            .insert("sub".into(), fun_atom(binary_ops(|a, b| a - b)));
+            .insert("car".into(), OnceLock::from(fun_atom(car_op)));
         self.local
-            .insert("div".into(), fun_atom(binary_ops(|a, b| a / b)));
-        self.local.insert("car".into(), fun_atom(car_op));
-        self.local.insert("cdr".into(), fun_atom(cdr_op));
-        self.local.insert("list".into(), fun_atom(list_op));
-        self.local.insert("apply".into(), fun_atom(apply_op));
-        self.local.insert("funcall".into(), fun_atom(funcall_op));
-        self.local.insert("cons".into(), fun_atom(cons_op));
-        self.local.insert("eq".into(), fun_atom(eq_op));
+            .insert("cdr".into(), OnceLock::from(fun_atom(cdr_op)));
+        self.local
+            .insert("list".into(), OnceLock::from(fun_atom(list_op)));
+        self.local
+            .insert("apply".into(), OnceLock::from(fun_atom(apply_op)));
+        self.local
+            .insert("funcall".into(), OnceLock::from(fun_atom(funcall_op)));
+        self.local
+            .insert("cons".into(), OnceLock::from(fun_atom(cons_op)));
+        self.local
+            .insert("eq".into(), OnceLock::from(fun_atom(eq_op)));
     }
 }
 
