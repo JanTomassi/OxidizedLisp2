@@ -38,8 +38,8 @@ where
 
 fn print_welcome() {
     println!("╔══════════════════════════════════════════╗");
-    println!("║         Lisp REPL - Type :help          ║");
-    println!("║           (Press Ctrl+D to exit)        ║");
+    println!("║          Lisp REPL - Type :help          ║");
+    println!("║          (Press Ctrl+D to exit)          ║");
     println!("╚══════════════════════════════════════════╝");
     println!();
 }
@@ -92,9 +92,7 @@ fn print_env() {
         let mut bindings: Vec<_> = env.local.iter().collect();
         bindings.sort_by(|a, b| a.0.cmp(b.0));
         for (name, value) in bindings {
-            if !matches!(value.as_ref(), atom::Atom::Fun(_)) {
-                println!("  {} => {:?}", name, value.as_ref());
-            }
+            println!("  {} => {:?}", name, value);
         }
     });
 }
