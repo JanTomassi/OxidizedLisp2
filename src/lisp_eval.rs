@@ -3,7 +3,7 @@
 //! Uses Arc<Env> for efficient environment management. Function calls save/restore
 //! environments via cheap Arc cloning (O(1)) instead of deep-cloning HashMaps (O(n)).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::atom::{Atom, Fun, SAtom, UserFn};
 use crate::env::Env;
@@ -50,7 +50,7 @@ fn apply_user_fun(
     let mut new_env = Env::with_parent(user.captured_env.clone());
 
     for (name, value) in user.params.iter().zip(actuals) {
-        new_env.local.insert(name.clone(), value);
+        new_env.local.insert(name.clone(), OnceLock::from(value));
     }
 
     *env = Arc::new(new_env);
@@ -372,7 +372,7 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                 };
             }
 
-            Step::Value(mut value) => match stack.pop() {
+            Step::Value(value) => match stack.pop() {
                 None => return Ok(value),
 
                 Some(Frame::RestoreEnv { env: saved_env }) => {
@@ -441,6 +441,11 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                     body,
                     saved_env: _,
                 }) => {
+                    if current_idx == 0 {
+                        for (name, _) in &bindings {
+                            Env::record(env, name.into());
+                        }
+                    }
                     if current_idx < bindings.len() {
                         let (name, lambda_val) = &bindings[current_idx].clone();
                         stack.push(Frame::Labels {
@@ -457,19 +462,7 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                 }
 
                 Some(Frame::LabelsEvalBody { name }) => {
-                    let lambda = Arc::get_mut(&mut value).unwrap();
-                    match lambda {
-                        Atom::Fun(fun) => match Arc::get_mut(fun).unwrap() {
-                            Fun::User(user_fn) => {
-                                let mut env = user_fn.captured_env.clone();
-                                Env::insert(&mut env, name.clone(), value.clone());
-                                eprintln!("DEBUG LabelsEvalBody env {:#?}", env);
-                            }
-                            Fun::Native(_) => unreachable!(),
-                        },
-                        _ => return Err("Label does not contain a function"),
-                    };
-                    Env::insert(env, name, value.clone());
+                    Env::set(env, name, value.clone())?;
                     step = Step::Value(value);
                 }
             },
