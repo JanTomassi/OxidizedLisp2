@@ -3,12 +3,15 @@
 //! Uses Arc<Env> for efficient environment management. Function calls save/restore
 //! environments via cheap Arc cloning (O(1)) instead of deep-cloning HashMaps (O(n)).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::atom::{Atom, Fun, SAtom, UserFn};
 use crate::env::Env;
 use crate::sexpr::SExpr;
 use crate::types::{Args, Frame, Step};
+
+static LAMBDA_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 fn is_special_form(name: &str) -> bool {
@@ -171,10 +174,17 @@ fn special_lambda(raw_args: SAtom, env: &Arc<Env>) -> Result<Step, &'static str>
                 .ok_or("lambda expects exactly 2 args: params and body")?;
             let params = parse_lambda_params(params_val.as_ref())?;
             // Capture current Arc<Env> for closure
+            let captured_env = Arc::new(Env::with_parent(env.clone()));
+            LAMBDA_COUNT.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[LAMBDA CREATED] count={}, captured_env_strong={}",
+                LAMBDA_COUNT.load(Ordering::Relaxed),
+                Arc::strong_count(&captured_env)
+            );
             let user_fn = UserFn {
                 params,
                 body: body_val,
-                captured_env: Arc::new(Env::with_parent(env.clone())),
+                captured_env,
             };
             Ok(Step::Value(crate::atom::SAtom::new(Atom::Fun(Arc::new(
                 Fun::User(user_fn),
@@ -356,7 +366,7 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
         match step {
             Step::Eval(expr) => {
                 step = match expr.as_ref() {
-                    Atom::Sym(sym) => Step::Value(env.lookup(sym).ok_or("Argument not found")?),
+                    Atom::Sym(sym) => Step::Value(env.lookup(&sym).ok_or("Argument not found")?),
                     Atom::Cons(sexpr) => match sexpr.car.as_ref() {
                         Atom::Sym(fname) if is_special_form(fname) => {
                             apply_special_form(fname, sexpr.cdr.clone(), env, stack)?

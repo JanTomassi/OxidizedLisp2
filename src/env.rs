@@ -5,6 +5,7 @@
 //! saves/restores via Arc cloning instead of deep-cloning HashMaps.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::atom::{Atom, Fun, SAtom};
@@ -13,6 +14,12 @@ use crate::nil;
 use crate::sexpr::SExpr;
 use crate::t;
 use crate::types::{Args, EvalResult, Step};
+
+static ENV_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn current_env_count() -> usize {
+    ENV_COUNT.load(Ordering::Relaxed)
+}
 
 /// The runtime environment.
 ///
@@ -36,6 +43,13 @@ impl Env {
     /// Creates a new child environment with the given parent.
     #[inline]
     pub fn with_parent(parent: Arc<Env>) -> Self {
+        let parent_strong = Arc::strong_count(&parent);
+        ENV_COUNT.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "[ENV CREATED] child, parent_strong={}, count={}",
+            parent_strong,
+            ENV_COUNT.load(Ordering::Relaxed)
+        );
         Self {
             parent: Some(parent),
             local: HashMap::new(),
@@ -299,9 +313,21 @@ impl Env {
 
 impl Default for Env {
     fn default() -> Self {
+        ENV_COUNT.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "[ENV CREATED] root, count={}",
+            ENV_COUNT.load(Ordering::Relaxed)
+        );
         Self {
             parent: None,
             local: HashMap::new(),
         }
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        let count = ENV_COUNT.fetch_sub(1, Ordering::Relaxed);
+        eprintln!("[ENV DROPPED] count={}", count - 1);
     }
 }

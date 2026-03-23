@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use rustyline::DefaultEditor;
 use rustyline::Result as RlResult;
 
-use env::Env;
+use env::{current_env_count, Env};
 use lisp_eval::eval;
 use lisp_parsing::parse;
 
@@ -100,6 +100,7 @@ fn print_env() {
 fn print_info() {
     println!("REPL Info:");
     println!("  Version: 0.1.0");
+    println!("  Active Envs: {}", current_env_count());
     with_repl_env(|env| {
         println!("  Variables: {}", env.local.len());
     });
