@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::atom::{Atom, Fun, SAtom, UserFn};
-use crate::env::Env;
+use crate::env::{self, Env};
 use crate::sexpr::SExpr;
 use crate::types::{Args, Frame, Step};
 
 static LAMBDA_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAMBDA_NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 fn is_special_form(name: &str) -> bool {
@@ -51,6 +53,24 @@ fn apply_user_fun(
     let saved_env = env.clone();
 
     let mut new_env = Env::with_parent(user.captured_env.clone());
+
+    let call_id = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    if env::env_trace_enabled() {
+        #[cfg(debug_assertions)]
+        let location = format!(
+            "at {}:{}",
+            std::panic::Location::caller().file(),
+            std::panic::Location::caller().line()
+        );
+        #[cfg(not(debug_assertions))]
+        let location = String::new();
+
+        eprintln!(
+            "[CALL #{} -> ENV #{} {}] from captured_env=#{}",
+            call_id, new_env.id, location, user.captured_env.id
+        );
+    }
 
     for (name, value) in user.params.iter().zip(actuals) {
         new_env.local.insert(name.clone(), OnceLock::from(value));
@@ -162,7 +182,15 @@ fn parse_lambda_params(v: &Atom) -> Result<Vec<String>, &'static str> {
     }
 }
 
-fn special_lambda(raw_args: SAtom, env: &Arc<Env>) -> Result<Step, &'static str> {
+pub fn special_lambda(raw_args: SAtom, env: &Arc<Env>) -> Result<Step, &'static str> {
+    special_lambda_with_name(raw_args, env, None)
+}
+
+pub fn special_lambda_with_name(
+    raw_args: SAtom,
+    env: &Arc<Env>,
+    name: Option<&str>,
+) -> Result<Step, &'static str> {
     match raw_args.as_ref() {
         Atom::Cons(sexpr) if sexpr.len == 2 => {
             let mut it = sexpr.iter();
@@ -173,14 +201,33 @@ fn special_lambda(raw_args: SAtom, env: &Arc<Env>) -> Result<Step, &'static str>
                 .next()
                 .ok_or("lambda expects exactly 2 args: params and body")?;
             let params = parse_lambda_params(params_val.as_ref())?;
-            // Capture current Arc<Env> for closure
+
             let captured_env = Arc::new(Env::with_parent(env.clone()));
+            let lambda_id = LAMBDA_NEXT_ID.fetch_add(1, Ordering::Relaxed);
             LAMBDA_COUNT.fetch_add(1, Ordering::Relaxed);
-            eprintln!(
-                "[LAMBDA CREATED] count={}, captured_env_strong={}",
-                LAMBDA_COUNT.load(Ordering::Relaxed),
-                Arc::strong_count(&captured_env)
-            );
+
+            let name_str = name.unwrap_or("<anonymous>");
+
+            if env::env_trace_enabled() {
+                #[cfg(debug_assertions)]
+                let location = format!(
+                    "at {}:{}",
+                    std::panic::Location::caller().file(),
+                    std::panic::Location::caller().line()
+                );
+                #[cfg(not(debug_assertions))]
+                let location = String::new();
+
+                eprintln!(
+                    "[LAMBDA #{} '{}' CREATED {}] captured_env=#{} captured_env_strong={}",
+                    lambda_id,
+                    name_str,
+                    location,
+                    captured_env.id,
+                    Arc::strong_count(&captured_env)
+                );
+            }
+
             let user_fn = UserFn {
                 params,
                 body: body_val,
@@ -449,7 +496,7 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                     bindings,
                     current_idx,
                     body,
-                    saved_env: _,
+                    saved_env,
                 }) => {
                     if current_idx == 0 {
                         for (name, _) in &bindings {
@@ -458,14 +505,21 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
                     }
                     if current_idx < bindings.len() {
                         let (name, lambda_val) = &bindings[current_idx].clone();
+
                         stack.push(Frame::Labels {
-                            bindings: bindings,
+                            bindings,
                             current_idx: current_idx + 1,
                             body,
-                            saved_env: env.clone(),
+                            saved_env,
                         });
                         stack.push(Frame::LabelsEvalBody { name: name.clone() });
-                        step = Step::Eval(lambda_val.clone());
+
+                        let lambda_args = match lambda_val.as_ref() {
+                            Atom::Cons(sexpr) => sexpr.cdr.clone(),
+                            _ => return Err("labels: invalid lambda form"),
+                        };
+                        let lambda_step = special_lambda_with_name(lambda_args, &saved_env, Some(name))?;
+                        step = lambda_step;
                     } else {
                         step = Step::Eval(body.clone());
                     }
@@ -481,10 +535,14 @@ fn drive_step(mut step: Step, env: &mut Arc<Env>, stack: &mut Vec<Frame>) -> Eva
 }
 
 /// Applies a callable to a list of already-evaluated arguments.
-pub fn apply_callable(callable: SAtom, args_value: SAtom, env: &mut Arc<Env>) -> EvalResult {
-    let mut stack = Vec::new();
-    let step = apply_callable_step(callable, args_value, env, &mut stack)?;
-    drive_step(step, env, &mut stack)
+pub fn apply_callable(
+    callable: SAtom,
+    args_value: SAtom,
+    env: &mut Arc<Env>,
+    stack: &mut Vec<Frame>,
+) -> EvalResult {
+    let step = apply_callable_step(callable, args_value, env, stack)?;
+    drive_step(step, env, stack)
 }
 
 /// Evaluates a Lisp expression.

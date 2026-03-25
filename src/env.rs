@@ -5,8 +5,8 @@
 //! saves/restores via Arc cloning instead of deep-cloning HashMaps.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::atom::{Atom, Fun, SAtom};
 use crate::lisp_eval::apply_callable_step;
@@ -16,9 +16,27 @@ use crate::t;
 use crate::types::{Args, EvalResult, Step};
 
 static ENV_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ENV_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+static ENV_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn current_env_count() -> usize {
     ENV_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn env_trace_enable() {
+    ENV_TRACE_ENABLED.store(true, Ordering::Relaxed);
+}
+
+pub fn env_trace_disable() {
+    ENV_TRACE_ENABLED.store(false, Ordering::Relaxed);
+}
+
+pub fn env_trace_enabled() -> bool {
+    ENV_TRACE_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn env_id(env: &Env) -> usize {
+    env.id
 }
 
 /// The runtime environment.
@@ -28,6 +46,7 @@ pub fn current_env_count() -> usize {
 /// the local scope (via Arc::make_mut for COW).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Env {
+    pub(crate) id: usize,
     pub(crate) parent: Option<Arc<Env>>,
     pub(crate) local: HashMap<String, OnceLock<SAtom>>,
 }
@@ -35,7 +54,32 @@ pub struct Env {
 impl Env {
     /// Creates a new root environment with builtins.
     pub fn root() -> Self {
-        let mut env = Self::default();
+        ENV_COUNT.fetch_add(1, Ordering::Relaxed);
+        let id = ENV_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(debug_assertions)]
+        let location = format!(
+            "at {}:{}",
+            std::panic::Location::caller().file(),
+            std::panic::Location::caller().line()
+        );
+        #[cfg(not(debug_assertions))]
+        let location = String::new();
+
+        if ENV_TRACE_ENABLED.load(Ordering::Relaxed) {
+            eprintln!(
+                "[ENV #{} CREATED root {}] count={}",
+                id,
+                location,
+                ENV_COUNT.load(Ordering::Relaxed)
+            );
+        }
+
+        let mut env = Self {
+            id,
+            parent: None,
+            local: HashMap::new(),
+        };
         env.builtins_init();
         env
     }
@@ -45,12 +89,31 @@ impl Env {
     pub fn with_parent(parent: Arc<Env>) -> Self {
         let parent_strong = Arc::strong_count(&parent);
         ENV_COUNT.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "[ENV CREATED] child, parent_strong={}, count={}",
-            parent_strong,
-            ENV_COUNT.load(Ordering::Relaxed)
+
+        let id = ENV_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(debug_assertions)]
+        let location = format!(
+            "at {}:{}",
+            std::panic::Location::caller().file(),
+            std::panic::Location::caller().line()
         );
+        #[cfg(not(debug_assertions))]
+        let location = String::new();
+
+        if ENV_TRACE_ENABLED.load(Ordering::Relaxed) {
+            eprintln!(
+                "[ENV #{} CREATED child {}] parent=#{} parent_strong={} count={}",
+                id,
+                location,
+                parent.id,
+                parent_strong,
+                ENV_COUNT.load(Ordering::Relaxed)
+            );
+        }
+
         Self {
+            id,
             parent: Some(parent),
             local: HashMap::new(),
         }
@@ -314,11 +377,28 @@ impl Env {
 impl Default for Env {
     fn default() -> Self {
         ENV_COUNT.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "[ENV CREATED] root, count={}",
-            ENV_COUNT.load(Ordering::Relaxed)
+        let id = ENV_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(debug_assertions)]
+        let location = format!(
+            "at {}:{}",
+            std::panic::Location::caller().file(),
+            std::panic::Location::caller().line()
         );
+        #[cfg(not(debug_assertions))]
+        let location = String::new();
+
+        if ENV_TRACE_ENABLED.load(Ordering::Relaxed) {
+            eprintln!(
+                "[ENV #{} CREATED root {}] count={}",
+                id,
+                location,
+                ENV_COUNT.load(Ordering::Relaxed)
+            );
+        }
+
         Self {
+            id,
             parent: None,
             local: HashMap::new(),
         }
@@ -328,6 +408,22 @@ impl Default for Env {
 impl Drop for Env {
     fn drop(&mut self) {
         let count = ENV_COUNT.fetch_sub(1, Ordering::Relaxed);
-        eprintln!("[ENV DROPPED] count={}", count - 1);
+        if ENV_TRACE_ENABLED.load(Ordering::Relaxed) {
+            #[cfg(debug_assertions)]
+            let location = format!(
+                "at {}:{}",
+                std::panic::Location::caller().file(),
+                std::panic::Location::caller().line()
+            );
+            #[cfg(not(debug_assertions))]
+            let location = String::new();
+
+            eprintln!(
+                "[ENV #{} DROPPED {}] count={}",
+                self.id,
+                location,
+                count - 1
+            );
+        }
     }
 }

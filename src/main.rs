@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use rustyline::DefaultEditor;
 use rustyline::Result as RlResult;
 
-use env::{current_env_count, Env};
+use env::{current_env_count, env_id, Env};
 use lisp_eval::eval;
 use lisp_parsing::parse;
 
@@ -52,6 +52,7 @@ Commands:
   :quit, :q, Ctrl+D   Exit the REPL
   :env, :e            Show all defined variables
   :info, :i           Show REPL info and stats
+  :trace, :t          Toggle env creation tracing
   :clear, :cl         Clear the screen
 
 Lisp Features:
@@ -102,6 +103,7 @@ fn print_info() {
     println!("  Version: 0.1.0");
     println!("  Active Envs: {}", current_env_count());
     with_repl_env(|env| {
+        println!("  REPL Env ID: #{}", env_id(env));
         println!("  Variables: {}", env.local.len());
     });
 }
@@ -122,6 +124,16 @@ fn handle_command(line: &str) -> Option<bool> {
         }
         "i" | "info" => {
             print_info();
+            None
+        }
+        "t" | "trace" => {
+            if env::env_trace_enabled() {
+                env::env_trace_disable();
+                println!("Env tracing disabled");
+            } else {
+                env::env_trace_enable();
+                println!("Env tracing enabled");
+            }
             None
         }
         "cl" | "clear" => {
